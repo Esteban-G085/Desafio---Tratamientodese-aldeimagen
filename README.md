@@ -17,6 +17,8 @@ El proyecto implementa un pipeline completo de procesamiento de señales tanto a
 - [Guía de Uso](#-guía-de-uso)
   - [Modo Procesar (Emisor)](#1-modo-procesar-envía)
   - [Modo Recibir (Receptor)](#2-modo-recibir-compañero)
+  - [Compresión de imagen](#3-compresión-de-imagen-desafío-4-punto-2)
+  - [Pruebas](#4-pruebas)
 - [Tecnologías Utilizadas](#-tecnologías-utilizadas)
 
 ---
@@ -100,6 +102,8 @@ El flujo de procesamiento se divide en 6 etapas secuenciales:
 ├── core/                       # Lógica central del procesamiento de señal
 │   ├── __init__.py
 │   ├── audio.py                # Lectura/escritura WAV y sonificación de imágenes
+│   ├── compression_common.py   # Texto de cambio de tamaño (ratio / "más grande")
+│   ├── compression_image.py    # Compresión WebP lossless → PNG y métricas
 │   ├── constantes.py           # Parámetros del protocolo y encabezado
 │   ├── imagen.py               # Carga, corrección EXIF y segmentación HSV
 │   ├── modulacion.py           # Modulación (ASK/FSK/PSK), canal AWGN y demodulación
@@ -114,8 +118,10 @@ El flujo de procesamiento se divide en 6 etapas secuenciales:
 │   ├── process_tab.py          # Pestaña de procesamiento y emisión
 │   ├── receive_tab.py          # Pestaña de recepción y demodulación
 │   ├── styles.qss              # Hoja de estilos de la interfaz gráfica
+│   ├── tab_comprimir_imagen.py # Pestaña de compresión de imagen (WebP → PNG)
 │   ├── widgets.py              # Componentes visuales personalizados
 │   └── worker.py               # Hilos en segundo plano (QThread) para no bloquear la UI
+├── tests/                      # Pruebas unitarias (incluye compresión de imagen)
 ├── .gitignore                  # Exclusiones de Git (caché, entornos, salidas)
 ├── requirements.txt            # Dependencias del proyecto
 ├── run_gui.py                  # Punto de entrada para ejecutar la aplicación
@@ -225,6 +231,48 @@ python run_gui.py
    - Demodulará los bits según el esquema indicado en los metadatos.
    - Validará la integridad de la cabecera y el CRC32.
    - Mostrará la imagen reconstruida y generará los archivos exportados (`recuperada.png` y `recuperada.svg`).
+
+---
+
+### 3. Compresión de imagen (Desafío 4, punto 2)
+
+En la pestaña **"Compresión de imagen"** se comprime la imagen del Desafío 3
+sin pérdida y se verifica la reconstrucción:
+
+1. Pulse **"📂 Elegir imagen"** y seleccione un archivo BMP, PNG, JPG, JPEG o WebP.
+2. Deje activada **"Compresión sin pérdida (lossless)"** y pulse
+   **"🗜 Comprimir a WebP"**. El archivo `.webp` se guarda en
+   `salida_desafio4/compresion_imagen/`.
+3. Pulse **"📂 Descomprimir WebP"** para reconstruir la imagen en PNG. Si el
+   WebP se generó en la sesión, se compara el SHA-256 de los píxeles y se
+   reporta *EXACTA (bit a bit)*.
+4. Use **"✅ Verificar"** para comparar píxel a píxel dos imágenes cualesquiera
+   (original y reconstruida). Se muestran MAE, RMSE, PSNR, porcentaje de
+   píxeles idénticos y el hash SHA-256 de los píxeles.
+5. El selector **"Vista"** permite ver *Comparar*, *Original*, *Reconstruida* o
+   *Diferencia*. El panel de diferencia muestra `|original − reconstruida| × 8`
+   sobre fondo negro; si no hay diferencias aparece el aviso
+   *"Sin diferencias (imágenes idénticas)"*.
+
+**Formatos:** se admiten `.bmp`, `.png`, `.jpg`, `.jpeg` y `.webp`. Los `.svg`
+son vectoriales: con `cairosvg` instalado se rasterizan automáticamente; si no,
+conviértalos a PNG antes de comprimir.
+
+**Nota sobre el ratio:** WebP lossless conserva todos los píxeles. Si la
+imagen de origen es JPG/JPEG, el WebP puede salir **más grande** porque el JPG
+ya descartó información y el WebP sin pérdida debe almacenar todos los píxeles.
+La interfaz lo indica diciendo «archivo X % más grande». Para reducir el tamaño,
+use un PNG/BMP como origen o active la compresión con pérdida.
+
+### 4. Pruebas
+
+```bash
+python -m unittest discover -s tests -q
+```
+
+`tests/test_compression_image.py` cubre el round-trip exacto en RGB y en RGBA
+(con transparencia), el rechazo de extensiones no soportadas, la comparación de
+imágenes de distinto tamaño y el texto de cambio de tamaño.
 
 ---
 

@@ -9,6 +9,7 @@ from PyQt6.QtCore import QFile, QTextStream
 
 from gui.process_tab import ProcessTab
 from gui.receive_tab import ReceiveTab
+from gui.tab_comprimir_imagen import TabComprimirImagen
 
 
 class MainWindow(QMainWindow):
@@ -36,8 +37,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tab_procesar = ProcessTab()
         self.tab_recibir = ReceiveTab()
+        self.tab_comprimir_imagen = TabComprimirImagen()
         self.tabs.addTab(self.tab_procesar, "Procesar (envía)")
         self.tabs.addTab(self.tab_recibir, "Recibir (compañero)")
+        self.tabs.addTab(self.tab_comprimir_imagen, "Compresión de imagen")
         layout.addWidget(self.tabs)
 
         self._aplicar_estilos()
