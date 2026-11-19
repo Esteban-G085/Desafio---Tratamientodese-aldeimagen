@@ -28,11 +28,13 @@ Este proyecto aborda el desafío de transmitir información visual (imágenes bi
 El sistema permite:
 1. Aislar elementos de interés mediante segmentación cromática avanzada.
 2. Analizar el cumplimiento del criterio de Nyquist para evitar aliasing espacial.
-3. Cuantizar y empaquetar la imagen en tramas digitales con detección de errores (CRC32).
-4. Modular los bits en frecuencias de audio mediante modulaciones digitales (**ASK**, **FSK**, **PSK**).
-5. Simular la transmisión por un canal con ruido blanco gaussiano (AWGN).
-6. Demodular la señal, validar la integridad de la trama y reconstruir la imagen original, evaluando la calidad mediante métricas cuantitativas (**MSE**, **PSNR** y **BER**).
-7. Sonificar la señal de imagen para percibir la degradación de forma acústica.
+3. Separar la imagen en **capas de color R, G y B** y comprimir cada capa por separado en **WebP**.
+4. Empaquetar las capas comprimidas en tramas digitales auto-descriptivas con detección de errores (CRC32).
+5. Modular los bits en frecuencias de audio mediante modulaciones digitales (**ASK**, **FSK**, **PSK**).
+6. Simular la transmisión por un canal con ruido blanco gaussiano (AWGN).
+7. Demodular la señal, validar la integridad de la trama y reconstruir la imagen original, evaluando la calidad mediante métricas cuantitativas (**MSE**, **PSNR** y **BER**).
+8. Entregar el resultado al compañero de dos formas: dentro de la señal modulada (**WAV**) o como un **ZIP directo** con las capas WebP para descomprimir y apilar.
+9. Sonificar la señal de imagen para percibir la degradación de forma acústica.
 
 ---
 
@@ -50,7 +52,7 @@ El flujo de procesamiento se divide en 6 etapas secuenciales:
  2. Análisis de Nyquist  ──────> Espectro 2D (FFT), evaluación de aliasing y remuestreo
          │
          ▼
- 3. Cuantización & Trama ──────> Reducción a N bits, cabecera binaria y CRC32
+ 3. Capas RGB + WebP   ──────> Cuantización a N bits, WebP por capa, cabecera v2 y CRC32
          │
          ▼
  4. Modulación Digital   ──────> Modulación paso banda (ASK / FSK / PSK) a señal WAV
@@ -74,9 +76,11 @@ El flujo de procesamiento se divide en 6 etapas secuenciales:
    - Determinación de la frecuencia máxima de la imagen y validación del criterio de Nyquist ($f_s \ge 2 f_{max}$).
    - Remuestreo/diezmado espacial bilineal o por área al ancho objetivo seleccionado.
 
-3. **Digitalización y Construcción de Trama (`core/trama.py`, `core/pipeline.py`)**:
-   - Cuantización uniforme a $N$ bits por muestra ($2^N$ niveles de intensidad).
-   - Generación de trama binaria robusta con cabecera de sincronización y código de redundancia cíclica (CRC32).
+3. **Capas de Color, Compresión y Construcción de Trama (`core/compresion.py`, `core/trama.py`, `core/pipeline.py`)**:
+   - Separación de la imagen en tres capas en escala de grises (R, G, B) y cuantización uniforme a $N$ bits por muestra ($2^N$ niveles).
+   - Compresión independiente de cada capa en **WebP** (calidad configurable 1-100).
+   - Generación de una trama v2 auto-descriptiva: indica dimensiones, número de capas, profundidad, calidad, longitud del payload y CRC32.
+   - La lista de niveles cuantizados por capa y los bytes WebP se guardan también como artefactos (`03_digital.bin`, `capa_R.webp`, `capa_G.webp`, `capa_B.webp`).
 
 4. **Modulación Digital y Sonificación (`core/modulacion.py`, `core/audio.py`)**:
    - Mapeo de la trama de bits a señales de audio analógicas muestreadas a $f_s = 44.1\text{ kHz}$.
@@ -100,6 +104,7 @@ El flujo de procesamiento se divide en 6 etapas secuenciales:
 ├── core/                       # Lógica central del procesamiento de señal
 │   ├── __init__.py
 │   ├── audio.py                # Lectura/escritura WAV y sonificación de imágenes
+│   ├── compresion.py           # Capas R/G/B y compresión/descompresión WebP
 │   ├── constantes.py           # Parámetros del protocolo y encabezado
 │   ├── imagen.py               # Carga, corrección EXIF y segmentación HSV
 │   ├── modulacion.py           # Modulación (ASK/FSK/PSK), canal AWGN y demodulación
@@ -126,16 +131,26 @@ El flujo de procesamiento se divide en 6 etapas secuenciales:
 
 ## 📡 Protocolo de Trama Digital
 
-Para garantizar una transmisión confiable y auto-descriptiva, la trama se organiza en una cabecera binaria fija de **88 bits** seguida del payload de la imagen:
+### Formato v2 (capas WebP, uso actual)
+
+La trama v2 tiene una cabecera fija de **136 bits** seguida de un payload de longitud variable. Cada capa WebP se precede de su longitud en 32 bits (big-endian) para poder separar las tres capas aunque viajen concatenadas:
 
 | Campo | Longitud | Descripción |
 | :--- | :---: | :--- |
-| **Sincronización (MAGIC)** | 16 bits | Patrón fijo de inicio de trama (`0xA5C3`) |
+| **Sincronización (MAGIC)** | 16 bits | Patrón fijo `0xA5C4` |
+| **Versión** | 8 bits | `2` |
 | **Ancho ($W$)** | 16 bits | Ancho de la imagen en píxeles |
 | **Alto ($H$)** | 16 bits | Alto de la imagen en píxeles |
-| **Profundidad de bits ($B$)** | 8 bits | Bits por muestra / nivel de cuantización |
-| **Checksum (CRC32)** | 32 bits | Suma de comprobación sobre el payload para validación de integridad |
-| **Payload** | $W \times H \times 3 \times B$ bits | Muestras cuantizadas de los canales RGB serializadas |
+| **Número de capas** | 8 bits | `3` (R, G, B) |
+| **Profundidad ($B$)** | 8 bits | Bits por muestra antes de WebP |
+| **Calidad WebP** | 8 bits | Calidad de compresión (1-100) |
+| **Bytes de payload** | 32 bits | Longitud total del payload (incluye las longitudes de capa) |
+| **Checksum (CRC32)** | 32 bits | Suma de comprobación sobre todo el payload |
+| **Payload** | Variable | `[len_R(32) | WebP_R] [len_G(32) | WebP_G] [len_B(32) | WebP_B]` |
+
+### Formato v1 (legacy, RGB sin comprimir)
+
+Se mantiene el parseo de paquetes antiguos con cabecera de **88 bits**: `MAGIC 0xA5C3 | ancho(16) | alto(16) | bits(8) | CRC32(32)` y un payload de $W \times H \times 3 \times B$ bits con las muestras RGB serializadas. El receptor detecta la versión leyendo `meta.json`.
 
 ---
 
@@ -169,8 +184,8 @@ El sistema implementa tres esquemas digitales paso banda con tasa de baudios con
 
 ### 2. Clonar el repositorio
 ```bash
-git clone https://github.com/Esteban-G085/Desaf-o---Tratamiento-de-se-al-de-imagen.git
-cd Desaf-o---Tratamiento-de-se-al-de-imagen
+git clone https://github.com/Esteban-G085/Desafio---Tratamientoimagen.git
+cd Desafio---Tratamientoimagen
 ```
 
 ### 3. Crear y activar entorno virtual (recomendado)
@@ -205,26 +220,30 @@ python run_gui.py
 2. Seleccione la imagen original a transmitir (formatos `.jpg`, `.jpeg`, `.png`, etc.).
 3. Configure los parámetros de modulación y muestreo:
    - **Ancho objetivo**: Resolución espacial a la que se remuestreará la imagen (ej. 64 px).
-   - **Profundidad de cuantización**: Número de bits por muestra (ej. 8 bits).
+   - **Profundidad de cuantización**: Niveles por capa antes de comprimir (ej. 8 bits).
    - **Esquema de modulación**: ASK, FSK o PSK.
    - **Tasa de baudios**: Velocidad de modulación de símbolos por segundo.
    - **SNR del canal**: Relación señal a ruido en dB (dejar vacío para canal ideal sin ruido).
-4. Haga clic en **"Ejecutar Pipeline"**.
-5. Al finalizar, el sistema generará los gráficos analíticos, métricas (BER, MSE, PSNR) y creará automáticamente un archivo comprimido:
+   - **Entrega al compañero**: `Ambos (WAV + WebP)` (predeterminado), `Solo WAV modulado` o `Solo WebP directo`.
+   - **Calidad WebP (%)**: 1-100; valores más bajos reducen el payload (predeterminado 85).
+4. Haga clic en **"Procesar imagen"**.
+5. Al finalizar se generan, según el flujo elegido:
    ```text
-   salida_desafio4/paquete_para_companero.zip
+   salida_desafio4/paquete_para_companero.zip   # señal modulada + meta.json (v2)
+   salida_desafio4/paquete_comprimido.zip       # capa_R.webp + capa_G.webp + capa_B.webp + meta.json
    ```
-   Dicho paquete contiene la señal modulada en audio `.wav` y los metadatos de sincronización `meta.json`.
+   Las capas WebP también se guardan sueltas en `salida_desafio4/` para inspección.
 
 ### 2. Modo Recibir (Compañero)
 1. Abra la pestaña **"Recibir (compañero)"**.
-2. Cargue el archivo `paquete_para_companero.zip` proporcionado por el emisor.
-3. Haga clic en **"Demodular y Reconstruir"**.
-4. El sistema:
-   - Extraerá la señal modulada.
-   - Demodulará los bits según el esquema indicado en los metadatos.
-   - Validará la integridad de la cabecera y el CRC32.
-   - Mostrará la imagen reconstruida y generará los archivos exportados (`recuperada.png` y `recuperada.svg`).
+2. Cargue el ZIP proporcionado por el emisor (`paquete_para_companero.zip` o `paquete_comprimido.zip`).
+3. En **"Tipo de paquete recibido"** deje *Detección automática* o elija explícitamente WAV/WebP.
+4. Haga clic en **"Procesar recepción"**.
+5. El sistema:
+   - **Flujo WAV:** extrae la señal, demodula según los metadatos, valida cabecera y CRC32, separa las tres capas WebP y las apila.
+   - **Flujo WebP directo:** lee `capa_R.webp`, `capa_G.webp` y `capa_B.webp`, las descomprime y apila sin pasar por el canal modulado.
+   - Muestra la imagen reconstruida y guarda `recuperada.png`, `recuperada.svg` y `recuperada_analisis.png`.
+   - Con paquetes v1 antiguos mantiene la reconstrucción RGB sin comprimir.
 
 ---
 
@@ -232,7 +251,8 @@ python run_gui.py
 
 - **Lenguaje:** [Python 3.10+](https://www.python.org/)
 - **Interfaz Gráfica:** [PyQt6](https://riverbankcomputing.com/software/pyqt/)
-- **Procesamiento de Imágenes y Visión:** [OpenCV (`opencv-python`)](https://opencv.org/), [Pillow (PIL)](https://python-pillow.org/)
+- **Procesamiento de Imágenes y Visión:** [OpenCV (`opencv-python`)](https://opencv.org/), [Pillow (PIL)](https://python-pillow.org/), formato **WebP** para compresión por capas
 - **Cálculo Numérico y Señales:** [NumPy](https://numpy.org/)
 - **Visualización y Gráficas:** [Matplotlib](https://matplotlib.org/)
 - **Audio y Sonificación:** [SoundDevice](https://python-sounddevice.readthedocs.io/), módulo nativo `wave`
+

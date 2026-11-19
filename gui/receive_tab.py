@@ -6,7 +6,7 @@ import os
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
+    QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
     QProgressBar, QPushButton, QVBoxLayout, QWidget, QSizePolicy,
 )
 
@@ -47,6 +47,19 @@ class ReceiveTab(QWidget):
 
         grp_zip.setLayout(v)
         layout.addWidget(grp_zip)
+
+        # ============ FILA 1b: tipo de paquete ============
+        grp_tipo = QGroupBox("Tipo de paquete recibido")
+        vt = QHBoxLayout()
+        self.combo_flujo = QComboBox()
+        self.combo_flujo.addItems([
+            "Detección automática",
+            "WAV modulado (capas WebP)",
+            "WebP directo (sin modulación)",
+        ])
+        vt.addWidget(self.combo_flujo)
+        grp_tipo.setLayout(vt)
+        layout.addWidget(grp_tipo)
 
         # ============ FILA 2: imagen recuperada (con scroll) ============
         self.lbl_tit_img = QLabel("2. Imagen recuperada")
@@ -132,6 +145,7 @@ class ReceiveTab(QWidget):
         if self.worker is not None and self.worker.isRunning():
             return
 
+        flujos = {0: "auto", 1: "wav", 2: "directo"}
         kwargs = {
             "paquete_zip": self.ruta_zip,
             "salida": "recibido",
@@ -139,10 +153,12 @@ class ReceiveTab(QWidget):
             "mostrar_graficas": True,
             "escuchar_seg": 8,
             "retener": 10,
+            "flujo": flujos[self.combo_flujo.currentIndex()],
         }
 
         self.btn_seleccionar.setEnabled(False)
         self.btn_procesar.setEnabled(False)
+        self.combo_flujo.setEnabled(False)
         self.progreso.setValue(0)
         self.lbl_estado.set_text("Procesando recepción...")
         self.worker = PipelineWorker(mode="receive", **kwargs)
@@ -160,31 +176,46 @@ class ReceiveTab(QWidget):
 
         self.btn_seleccionar.setEnabled(True)
         self.btn_procesar.setEnabled(True)
+        self.combo_flujo.setEnabled(True)
         self.btn_abrir_carpeta.setEnabled(True)
-        self.btn_audio.setEnabled(True)
+        self.btn_audio.setEnabled(bool(resultado.get("ruta_audio")))
 
         self.img_recuperada.set_image(resultado["imagen_recuperada"], max_display=700)
 
         meta = resultado["meta"]
         h = resultado.get("header", {})
-        self.lbl_info.setText(
-            f"{meta['esquema']} a {meta['baud']:.0f} bps, fs = {meta['fs']} Hz | "
-            f"{h.get('ancho', '?')}x{h.get('alto', '?')} px, "
-            f"{h.get('bits', '?')} bits/canal, CRC32: {'OK' if h.get('crc_ok') else 'FALLO'}"
-        )
+        flujo = resultado.get("flujo", "wav")
+        if flujo == "directo":
+            self.lbl_info.setText(
+                f"WebP directo | calidad {meta.get('calidad', '?')}% | "
+                f"{h.get('ancho', '?')}x{h.get('alto', '?')} px | "
+                f"{h.get('n_capas', 3)} capas R/G/B | "
+                f"{resultado.get('tam_webp_kb', 0):.1f} KB"
+            )
+            detalle = (
+                f"Flujo: WebP directo (sin modulación)\n"
+                f"Capas descomprimidas: {h.get('n_capas', 3)}\n"
+                f"Tamaño WebP: {resultado.get('tam_webp_kb', 0):.1f} KB"
+            )
+        else:
+            self.lbl_info.setText(
+                f"{meta['esquema']} a {meta['baud']:.0f} bps, fs = {meta['fs']} Hz | "
+                f"{h.get('ancho', '?')}x{h.get('alto', '?')} px, "
+                f"{h.get('bits', '?')} bits/canal, CRC32: {'OK' if h.get('crc_ok') else 'FALLO'}"
+            )
+            detalle = f"Esquema: {meta['esquema']}\nCRC32: {'OK' if h.get('crc_ok') else 'FALLO'}"
 
         self.lbl_estado.set_ok("Recepción completada exitosamente")
 
         QMessageBox.information(
             self, "Recepción completada",
-            f"Imagen recuperada guardada en:\n{resultado['ruta_png']}\n\n"
-            f"Esquema: {meta['esquema']}\n"
-            f"CRC32: {'OK' if h.get('crc_ok') else 'FALLO'}"
+            f"Imagen recuperada guardada en:\n{resultado['ruta_png']}\n\n{detalle}"
         )
 
     def _on_error(self, mensaje):
         self.btn_seleccionar.setEnabled(True)
         self.btn_procesar.setEnabled(True)
+        self.combo_flujo.setEnabled(True)
         self.lbl_estado.set_error(mensaje)
         QMessageBox.critical(self, "Error de recepción", mensaje)
 

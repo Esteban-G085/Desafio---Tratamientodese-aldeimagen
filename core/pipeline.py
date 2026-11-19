@@ -20,12 +20,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .audio import guardar_wav, leer_wav, sonificar
+from .compresion import comprimir_capas, reconstruir_desde_capas
 from .constantes import HDR_BITS
 from .imagen import cargar_imagen, filtrar_rojo_dominante
 from .modulacion import canal, demodular, modular
 from .nyquist import analisis_nyquist, reportar_frecuencia_muestreo
 from .reconstruccion import fig_reconstruccion, guardar_png, guardar_svg, metricas
-from .trama import construir_trama, parsear_trama
+from .trama import (
+    construir_trama,
+    construir_trama_capas,
+    parsear_trama,
+    parsear_trama_capas,
+)
 from .utils import bits_a_int, int_a_bits
 
 
@@ -48,9 +54,13 @@ class ImageSignalPipeline:
     # ------------------------------------------------------------------ #
     def run_send(self, foto_path, salida, mod="FSK", bits=8, ancho=64,
                  fs=44100, baud=4410.0, snr=None, reproducir_audio=False,
-                 mostrar_graficas=True, escuchar_seg=8, retener=10):
+                 mostrar_graficas=True, escuchar_seg=8, retener=10,
+                 calidad_webp=85, flujo="ambos"):
         """
         Ejecuta etapas 1-6 y devuelve un dict con rutas, imágenes y métricas.
+
+        calidad_webp: calidad de compresión de cada capa (1-100).
+        flujo: "wav" (señal modulada), "directo" (solo WebP) o "ambos".
         """
         os.makedirs(salida, exist_ok=True)
         spb = int(round(fs / baud))
@@ -87,12 +97,25 @@ class ImageSignalPipeline:
 
         alto = max(1, int(round(info["alto"] * ancho / info["ancho"])))
         pequena = cv2.resize(filtrada, (ancho, alto), interpolation=cv2.INTER_AREA)
-        q = self._cuantizar(pequena, bits)
-        digital = self._descuantizar(q, bits)
-        trama, payload = construir_trama(q, bits)
+        self._progreso("capas", "Separando en capas R/G/B y comprimiendo a WebP...", 30)
+        capas_bytes, capas_cuantizadas = comprimir_capas(pequena, bits, calidad_webp)
+        digital = reconstruir_desde_capas(capas_bytes, ancho, alto)
+        trama, payload = construir_trama_capas(capas_bytes, ancho, alto, bits, calidad_webp)
 
-        n_muestras = q.size
-        self._progreso("trama", f"Trama construida: {len(trama):,} bits ({len(payload):,} bits payload)", 35)
+        nombres_capas = ["capa_R.webp", "capa_G.webp", "capa_B.webp"][:len(capas_bytes)]
+        rutas_capas = []
+        for nombre, blob in zip(nombres_capas, capas_bytes):
+            ruta_capa = os.path.join(salida, nombre)
+            with open(ruta_capa, "wb") as f:
+                f.write(blob)
+            rutas_capas.append(ruta_capa)
+
+        tam_webp = sum(len(blob) for blob in capas_bytes)
+        self._progreso(
+            "trama",
+            f"Trama v2: {len(trama):,} bits | {len(capas_bytes)} capas WebP, {tam_webp:,} bytes",
+            35,
+        )
 
         ruta_bin = os.path.join(salida, "03_digital.bin")
         with open(ruta_bin, "wb") as f:
@@ -100,19 +123,20 @@ class ImageSignalPipeline:
         with open(os.path.join(salida, "03_digital_bits.txt"), "w") as f:
             f.write("".join(map(str, trama.tolist())))
 
+        cuant_visual = self._descuantizar(capas_cuantizadas, bits)
         fig, ax = plt.subplots(1, 3, figsize=(15, 4.2))
         fila = pequena[alto // 2, :, 0]
         ax[0].stem(fila, linefmt="C0-", markerfmt="C0.", basefmt=" ", label="muestreada (8 bit)")
-        ax[0].step(range(len(fila)), digital[alto // 2, :, 0], where="mid", color="C1",
+        ax[0].step(range(len(fila)), cuant_visual[alto // 2, :, 0], where="mid", color="C1",
                    label=f"cuantizada ({bits} bit)")
         ax[0].set(title="Fila central, canal R: señal muestreada y cuantizada", xlabel="n", ylabel="valor")
         ax[0].legend(fontsize=8)
-        ax[1].hist(q.reshape(-1), bins=np.arange(2 ** bits + 1) - 0.5, color="C2")
+        ax[1].hist(capas_cuantizadas.reshape(-1), bins=np.arange(2 ** bits + 1) - 0.5, color="C2")
         ax[1].set(title=f"Histograma de {2 ** bits} niveles", xlabel="nivel", ylabel="muestras")
         ax[2].imshow(digital, interpolation="nearest")
         ax[2].axis("off")
-        ax[2].set_title("Imagen digital resultante")
-        fig.suptitle("Etapa 3: digitalización (Byte / Bit)")
+        ax[2].set_title("Imagen digital (capas WebP)")
+        fig.suptitle("Etapa 3: capas RGB, cuantización y compresión WebP")
         ruta_dig = os.path.join(salida, "03_digitalizacion.png")
         fig.savefig(ruta_dig, dpi=130, bbox_inches="tight")
         plt.close(fig)
@@ -147,8 +171,19 @@ class ImageSignalPipeline:
         # ---- Canal + 5. Demodulación --------------------------------- #
         self._progreso("canal", "Aplicando canal ruidoso y demodulando...", 65)
         rx = canal(s, snr)
-        meta = {"version": 1, "esquema": mod, "fs": fs, "spb": spb, "baud": baud_real, "snr_db": snr}
-        bits_rec, est, umbral, img_rec, q_rec, h = self._demodular_y_reconstruir(
+        meta = {
+            "version": 2,
+            "flujo": "wav",
+            "formato": "WEBP",
+            "calidad": calidad_webp,
+            "capas": nombres_capas,
+            "esquema": mod,
+            "fs": fs,
+            "spb": spb,
+            "baud": baud_real,
+            "snr_db": snr,
+        }
+        bits_rec, est, umbral, img_rec, capas_rec, h = self._demodular_y_reconstruir_capas(
             rx, meta, salida, reproducir_audio, escuchar_seg, retener, fs)
 
         errores = int(np.sum(bits_rec[:len(trama)] != trama))
@@ -192,20 +227,39 @@ class ImageSignalPipeline:
         mse, psnr = fig_reconstruccion(pequena, digital, img_rec, fs, retener, salida, "06_comparacion.png")
         mse2, _ = metricas(digital, img_rec)
 
-        # ---- ZIP para el compañero ---------------------------------- #
-        self._progreso("zip", "Empaquetando ZIP para el compañero...", 95)
+        # ---- Paquetes para el compañero ------------------------------ #
+        self._progreso("zip", "Empaquetando los paquetes para el compañero...", 95)
         zip_path = os.path.join(salida, "paquete_para_companero.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-            z.write(ruta_mod, "senal_modulada.wav")
-            z.writestr("meta.json", json.dumps(meta, indent=2))
-            # También incluir el script para que el compañero lo tenga todo
-            try:
-                z.write(os.path.join(os.path.dirname(__file__), "..", "desafio4.py"), "desafio4.py")
-            except Exception:
-                pass
+        zip_directo = os.path.join(salida, "paquete_comprimido.zip")
+
+        if flujo in ("wav", "ambos"):
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+                z.write(ruta_mod, "senal_modulada.wav")
+                z.writestr("meta.json", json.dumps(meta, indent=2))
+        else:
+            zip_path = None
+
+        if flujo in ("directo", "ambos"):
+            meta_directo = {
+                "version": 2,
+                "flujo": "directo",
+                "formato": "WEBP",
+                "calidad": calidad_webp,
+                "capas": nombres_capas,
+                "ancho": ancho,
+                "alto": alto,
+                "bits": bits,
+            }
+            with zipfile.ZipFile(zip_directo, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+                for nombre, ruta_capa in zip(nombres_capas, rutas_capas):
+                    z.write(ruta_capa, nombre)
+                z.writestr("meta.json", json.dumps(meta_directo, indent=2))
+        else:
+            zip_directo = None
 
         tam_wav = os.path.getsize(ruta_mod)
-        tam_zip = os.path.getsize(zip_path)
+        tam_zip = os.path.getsize(zip_path) if zip_path else 0
+        tam_zip_directo = os.path.getsize(zip_directo) if zip_directo else 0
 
         self._progreso("fin", "Proceso completado.", 100)
 
@@ -214,6 +268,10 @@ class ImageSignalPipeline:
             "ruta_png": ruta_png,
             "ruta_svg": ruta_svg,
             "ruta_zip": zip_path,
+            "ruta_zip_directo": zip_directo,
+            "rutas_capas": rutas_capas,
+            "flujo": flujo,
+            "header": h,
             "ruta_mod_wav": ruta_mod,
             "ruta_audio_demo": ruta_audio_demo,
             "ruta_audio_orig": ruta_audio_orig,
@@ -234,6 +292,9 @@ class ImageSignalPipeline:
             "ber": ber,
             "tam_wav_mb": tam_wav / 1e6,
             "tam_zip_mb": tam_zip / 1e6,
+            "tam_zip_directo_kb": tam_zip_directo / 1e3,
+            "tam_webp_kb": tam_webp / 1e3,
+            "calidad_webp": calidad_webp,
             "duracion_s": dur,
         }
 
@@ -241,18 +302,148 @@ class ImageSignalPipeline:
     #  Modo RECEPCIÓN: compañero desempaqueta ZIP y demodula
     # ------------------------------------------------------------------ #
     def run_receive(self, paquete_zip, salida, reproducir_audio=False,
-                    mostrar_graficas=True, escuchar_seg=8, retener=10):
-        """Extrae el ZIP, demodula y reconstruye la imagen. Devuelve dict con resultados."""
+                    mostrar_graficas=True, escuchar_seg=8, retener=10, flujo="auto"):
+        """
+        Detecta el tipo de paquete y reconstruye la imagen.
+
+        flujo: "auto" (lo deduce del ZIP), "wav" (señal modulada) o "directo" (WebP).
+        Se mantiene compatibilidad con paquetes antiguos sin comprimir (v1).
+        """
         os.makedirs(salida, exist_ok=True)
+        with zipfile.ZipFile(paquete_zip) as z:
+            nombres = z.namelist()
+            meta = json.loads(z.read("meta.json"))
+
+        if flujo not in ("wav", "directo"):
+            if meta.get("flujo") in ("wav", "directo"):
+                flujo = meta["flujo"]
+            else:
+                flujo = "wav" if "senal_modulada.wav" in nombres else "directo"
+
+        if flujo == "directo":
+            return self.run_receive_directo(paquete_zip, salida, meta=meta)
+        if meta.get("version", 1) == 1:
+            return self._run_receive_legacy(
+                paquete_zip, salida, meta, reproducir_audio, escuchar_seg, retener
+            )
+
+        # ---- v2 WAV: capas WebP dentro de la señal modulada ---------- #
         self._progreso("carga", "Extrayendo paquete recibido...", 10)
         with zipfile.ZipFile(paquete_zip) as z:
-            meta = json.loads(z.read("meta.json"))
             z.extract("senal_modulada.wav", salida)
 
         x, fs = leer_wav(os.path.join(salida, "senal_modulada.wav"))
         esquema = meta["esquema"]
         spb = meta["spb"]
         self._progreso("info", f"Recepción: {esquema} a {meta['baud']:.0f} bps, fs = {fs} Hz", 20)
+
+        meta_completa = dict(meta)
+        meta_completa["fs"] = fs
+        bits_rec, est, umbral, img, capas_rec, h = self._demodular_y_reconstruir_capas(
+            x, meta_completa, salida, reproducir_audio, escuchar_seg, retener, fs)
+
+        s_demo = sonificar(img, retener)
+        ruta_audio = os.path.join(salida, "demodulada_audio.wav")
+        guardar_wav(ruta_audio, s_demo, fs)
+        ruta_png = os.path.join(salida, "recuperada.png")
+        ruta_svg = os.path.join(salida, "recuperada.svg")
+        guardar_png(img, ruta_png)
+        guardar_svg(img, ruta_svg)
+
+        fig, ax = plt.subplots(1, 2, figsize=(12, 5))
+        ax[0].imshow(img, interpolation="nearest")
+        ax[0].set_title("Imagen recuperada (capas WebP)")
+        ax[0].axis("off")
+        ax[1].plot(est[HDR_BITS:HDR_BITS + 200], ".-")
+        ax[1].axhline(umbral, color="r", ls="--")
+        ax[1].set_title("Estadístico de decisión (primeros bits de datos)")
+        ruta_analisis = os.path.join(salida, "recuperada_analisis.png")
+        fig.savefig(ruta_analisis, dpi=130, bbox_inches="tight")
+        plt.close(fig)
+
+        self._progreso("fin", "Recepción completada.", 100)
+        return {
+            "salida": salida,
+            "imagen_recuperada": img,
+            "ruta_png": ruta_png,
+            "ruta_svg": ruta_svg,
+            "ruta_audio": ruta_audio,
+            "ruta_analisis": ruta_analisis,
+            "meta": meta_completa,
+            "header": h,
+            "flujo": "wav",
+            "capas_recuperadas": capas_rec,
+        }
+
+    def run_receive_directo(self, paquete_zip, salida, meta=None):
+        """Reconstruye la imagen a partir de un ZIP con las 3 capas WebP."""
+        os.makedirs(salida, exist_ok=True)
+        self._progreso("carga", "Extrayendo capas WebP comprimidas...", 15)
+        with zipfile.ZipFile(paquete_zip) as z:
+            if meta is None:
+                meta = json.loads(z.read("meta.json"))
+            nombres = meta.get("capas") or [n for n in z.namelist() if n.lower().endswith(".webp")]
+            if len(nombres) != 3:
+                raise ValueError("El paquete directo debe contener 3 capas WebP (R, G, B).")
+            capas_bytes = [z.read(nombre) for nombre in nombres]
+
+        ancho, alto = meta.get("ancho"), meta.get("alto")
+        img = reconstruir_desde_capas(capas_bytes, ancho, alto)
+        self._progreso(
+            "reconstruccion",
+            f"Capas decodificadas y apiladas: {img.shape[1]}x{img.shape[0]} px",
+            60,
+        )
+
+        ruta_png = os.path.join(salida, "recuperada.png")
+        ruta_svg = os.path.join(salida, "recuperada.svg")
+        guardar_png(img, ruta_png)
+        guardar_svg(img, ruta_svg)
+
+        fig, ax = plt.subplots(1, 4, figsize=(15, 4))
+        for eje, capa, titulo in zip(ax[:3], (img[:, :, 0], img[:, :, 1], img[:, :, 2]), ("R", "G", "B")):
+            eje.imshow(capa, cmap="gray", vmin=0, vmax=255)
+            eje.set_title(f"Capa {titulo}")
+            eje.axis("off")
+        ax[3].imshow(img)
+        ax[3].set_title("Imagen reconstruida")
+        ax[3].axis("off")
+        fig.suptitle("Recepción directa: descompresión WebP de las capas")
+        ruta_analisis = os.path.join(salida, "recuperada_analisis.png")
+        fig.savefig(ruta_analisis, dpi=130, bbox_inches="tight")
+        plt.close(fig)
+
+        self._progreso("fin", "Recepción directa completada.", 100)
+        return {
+            "salida": salida,
+            "imagen_recuperada": img,
+            "ruta_png": ruta_png,
+            "ruta_svg": ruta_svg,
+            "ruta_audio": None,
+            "ruta_analisis": ruta_analisis,
+            "meta": meta,
+            "header": {
+                "ancho": img.shape[1],
+                "alto": img.shape[0],
+                "bits": meta.get("bits"),
+                "n_capas": 3,
+                "formato": "WEBP",
+                "crc_ok": True,
+            },
+            "flujo": "directo",
+            "tam_webp_kb": sum(len(c) for c in capas_bytes) / 1e3,
+        }
+
+    def _run_receive_legacy(self, paquete_zip, salida, meta, reproducir_audio,
+                            escuchar_seg, retener):
+        """Mantiene la recepción de paquetes v1 (RGB sin comprimir)."""
+        self._progreso("carga", "Extrayendo paquete recibido (formato v1)...", 10)
+        with zipfile.ZipFile(paquete_zip) as z:
+            z.extract("senal_modulada.wav", salida)
+
+        x, fs = leer_wav(os.path.join(salida, "senal_modulada.wav"))
+        esquema, spb = meta["esquema"], meta["spb"]
+        self._progreso("info", f"Recepción v1: {esquema} a {meta['baud']:.0f} bps, fs = {fs} Hz", 20)
 
         meta_completa = {"version": 1, "esquema": esquema, "fs": fs, "spb": spb,
                          "baud": meta["baud"], "snr_db": meta.get("snr_db")}
@@ -267,10 +458,9 @@ class ImageSignalPipeline:
         guardar_png(img, ruta_png)
         guardar_svg(img, ruta_svg)
 
-        # Figura de análisis (imagen + estadístico)
         fig, ax = plt.subplots(1, 2, figsize=(12, 5))
         ax[0].imshow(img, interpolation="nearest")
-        ax[0].set_title("Imagen recuperada")
+        ax[0].set_title("Imagen recuperada (v1)")
         ax[0].axis("off")
         ax[1].plot(est[HDR_BITS:HDR_BITS + 200], ".-")
         ax[1].axhline(umbral, color="r", ls="--")
@@ -280,7 +470,6 @@ class ImageSignalPipeline:
         plt.close(fig)
 
         self._progreso("fin", "Recepción completada.", 100)
-
         return {
             "salida": salida,
             "imagen_recuperada": img,
@@ -290,6 +479,7 @@ class ImageSignalPipeline:
             "ruta_analisis": ruta_analisis,
             "meta": meta_completa,
             "header": h,
+            "flujo": "wav",
         }
 
     # ------------------------------------------------------------------ #
@@ -325,3 +515,20 @@ class ImageSignalPipeline:
         self._progreso("demodulacion",
                        f"Cabecera: {h['ancho']}x{h['alto']} px, {h['bits']} bits/canal, CRC32 {crc_txt}", 74)
         return bits_rec, est, umbral, img, q, h
+
+    def _demodular_y_reconstruir_capas(self, x, meta, carpeta, reproducir_audio, max_seg,
+                                       retener, fs):
+        esquema, spb = meta["esquema"], meta["spb"]
+        self._progreso("demodulacion", f"Demodulando ({esquema})...", 70)
+        bits_rec, est, umbral = demodular(x, esquema, fs, spb)
+        self._progreso("demodulacion", f"{len(bits_rec):,} bits recuperados", 72)
+        capas_bytes, h = parsear_trama_capas(bits_rec)
+        img = reconstruir_desde_capas(capas_bytes, h["ancho"], h["alto"])
+        crc_txt = "OK" if h["crc_ok"] else "FALLO"
+        self._progreso(
+            "demodulacion",
+            f"Cabecera v{h['version']}: {h['ancho']}x{h['alto']} px, "
+            f"{h['n_capas']} capas WebP, CRC32 {crc_txt}",
+            74,
+        )
+        return bits_rec, est, umbral, img, capas_bytes, h

@@ -171,6 +171,23 @@ class ProcessTab(QWidget):
         self.spin_snr.setMinimumWidth(150)
         grid.addWidget(self.spin_snr, 2, 3)
 
+        grid.addWidget(self._label_param("Entrega al compañero:"), 3, 0, Qt.AlignmentFlag.AlignRight)
+        self.combo_flujo = QComboBox()
+        self.combo_flujo.addItems([
+            "Ambos (WAV + WebP)",
+            "Solo WAV modulado",
+            "Solo WebP directo",
+        ])
+        self.combo_flujo.setMinimumWidth(150)
+        grid.addWidget(self.combo_flujo, 3, 1)
+
+        grid.addWidget(self._label_param("Calidad WebP (%):"), 3, 2, Qt.AlignmentFlag.AlignRight)
+        self.spin_calidad = QSpinBox()
+        self.spin_calidad.setRange(1, 100)
+        self.spin_calidad.setValue(85)
+        self.spin_calidad.setMinimumWidth(150)
+        grid.addWidget(self.spin_calidad, 3, 3)
+
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         grp_param.setLayout(grid)
@@ -350,6 +367,7 @@ class ProcessTab(QWidget):
         if self.spin_snr.specialValueText() == "Sin ruido" and snr == 0:
             snr = None
 
+        flujos = {0: "ambos", 1: "wav", 2: "directo"}
         kwargs = {
             "foto_path": self.ruta_foto,
             "salida": "salida_desafio4",
@@ -363,6 +381,8 @@ class ProcessTab(QWidget):
             "mostrar_graficas": self.chk_graficas.isChecked(),
             "escuchar_seg": 8,
             "retener": 10,
+            "calidad_webp": self.spin_calidad.value(),
+            "flujo": flujos[self.combo_flujo.currentIndex()],
         }
 
         self._estado_procesando(True)
@@ -384,6 +404,8 @@ class ProcessTab(QWidget):
         self.spin_snr.setEnabled(enabled)
         self.chk_audio.setEnabled(enabled)
         self.chk_graficas.setEnabled(enabled)
+        self.combo_flujo.setEnabled(enabled)
+        self.spin_calidad.setEnabled(enabled)
         self.btn_preset_rapido.setEnabled(enabled)
         self.btn_preset_calidad.setEnabled(enabled)
         self.btn_preset_ruidoso.setEnabled(enabled)
@@ -412,7 +434,9 @@ class ProcessTab(QWidget):
             f"MSE: {resultado['mse']:.2f}   "
             f"PSNR: {resultado['psnr']:.1f} dB   "
             f"BER: {resultado['ber']:.2e}   "
-            f"Errores: {resultado['errores_bit']:,}"
+            f"Errores: {resultado['errores_bit']:,}\n"
+            f"Capas WebP: {resultado['tam_webp_kb']:.1f} KB   "
+            f"ZIP directo: {resultado['tam_zip_directo_kb']:.1f} KB"
         )
 
         self.btn_abrir_carpeta.setEnabled(True)
@@ -421,10 +445,13 @@ class ProcessTab(QWidget):
 
         self.lbl_estado.set_ok("Proceso completado exitosamente")
 
+        zip_wav = resultado.get("ruta_zip") or "No generado (elige el flujo WAV o Ambos)"
+        zip_directo = resultado.get("ruta_zip_directo") or "No generado (elige el flujo WebP o Ambos)"
         QMessageBox.information(
             self, "Proceso completado",
             f"Imagen reconstruida:\n{resultado['ruta_png']}\n\n"
-            f"ZIP para compañero:\n{resultado['ruta_zip']}\n\n"
+            f"ZIP con señal modulada:\n{zip_wav}\n\n"
+            f"ZIP con capas WebP comprimidas:\n{zip_directo}\n\n"
             f"MSE={resultado['mse']:.2f}, PSNR={resultado['psnr']:.1f} dB, BER={resultado['ber']:.2e}"
         )
 
